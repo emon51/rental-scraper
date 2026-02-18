@@ -6,6 +6,15 @@ type Config struct {
 	PageTimeout  int
 	RequestDelay int
 	Headless     bool
+	DBConfig     DatabaseConfig
+}
+
+type DatabaseConfig struct {
+	Host     string
+	Port     int
+	User     string
+	Password string
+	DBName   string
 }
 
 func NewConfig() *Config {
@@ -15,5 +24,12 @@ func NewConfig() *Config {
 		PageTimeout:  300,
 		RequestDelay: 2,
 		Headless:     true,
+		DBConfig: DatabaseConfig{
+			Host:     "localhost",
+			Port:     5432,
+			User:     "postgres",
+			Password: "postgres",
+			DBName:   "rental_scraper",
+		},
 	}
 }
