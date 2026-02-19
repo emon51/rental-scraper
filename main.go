@@ -8,10 +8,10 @@ import (
 
 	"github.com/chromedp/chromedp"
 	"github.com/emon51/rental-scraper/config"
-	"github.com/emon51/rental-scraper/scraper"
-	"github.com/emon51/rental-scraper/storage"
+	"github.com/emon51/rental-scraper/models"
+	scraper "github.com/emon51/rental-scraper/scraper"
 	"github.com/emon51/rental-scraper/services"
-
+	"github.com/emon51/rental-scraper/storage"
 )
 
 func main() {
@@ -25,6 +25,7 @@ func main() {
 		chromedp.Flag("headless", cfg.Headless),
 		chromedp.Flag("disable-gpu", false),
 		chromedp.Flag("no-sandbox", true),
+		chromedp.UserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
 	)
 
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
@@ -37,21 +38,31 @@ func main() {
 	defer cancel()
 
 	// Create scraper
-	scraper := airbnb.NewScraper(cfg.BaseURL, cfg.MaxListings, cfg.RequestDelay)
+	s := scraper.NewScraper(cfg.BaseURL, cfg.MaxListings, cfg.RequestDelay)
 
-	// Scrape listings
+	// Scrape all locations
 	fmt.Println("\n=== STEP 1: SCRAPING ===")
-	listings, err := scraper.Scrape(ctx)
-	if err != nil {
-		log.Fatalf("Scraping failed: %v", err)
+	var allListings []models.Listing
+
+	for _, loc := range cfg.Locations {
+		fmt.Printf("\nScraping: %s\n", loc.DisplayName)
+		listings, err := s.ScrapeLocation(ctx, loc.Slug, loc.DisplayName)
+		if err != nil {
+			fmt.Printf("  WARNING: Failed to scrape %s: %v\n", loc.DisplayName, err)
+			continue
+		}
+		allListings = append(allListings, listings...)
+
+		// Small pause between locations to avoid rate limiting
+		time.Sleep(3 * time.Second)
 	}
 
-	fmt.Printf("Raw listings scraped: %d\n", len(listings))
+	fmt.Printf("\nRaw listings scraped: %d\n", len(allListings))
 
 	// Filter and clean data
 	fmt.Println("\n=== STEP 2: FILTERING & CLEANING ===")
 	filter := services.NewFilter()
-	cleanedListings := filter.CleanListings(listings)
+	cleanedListings := filter.CleanListings(allListings)
 	fmt.Printf("Cleaned listings: %d\n", len(cleanedListings))
 
 	// Save to CSV
@@ -60,7 +71,7 @@ func main() {
 	if err := csvWriter.WriteListings(cleanedListings); err != nil {
 		log.Fatalf("Failed to save CSV: %v", err)
 	}
-	fmt.Println("Data saved to listings.csv")
+	fmt.Println("✓ Data saved to listings.csv")
 
 	// Save to PostgreSQL
 	fmt.Println("\n=== STEP 4: SAVING TO POSTGRESQL ===")
@@ -76,22 +87,19 @@ func main() {
 	}
 	defer pgWriter.Close()
 
-	// Create table
 	if err := pgWriter.CreateTable(); err != nil {
 		log.Fatalf("Failed to create table: %v", err)
 	}
-	fmt.Println("Database table created")
+	fmt.Println("✓ Database table created")
 
-	// Insert listings
 	if err := pgWriter.InsertListings(cleanedListings); err != nil {
 		log.Fatalf("Failed to insert listings: %v", err)
 	}
-	fmt.Printf("%d listings saved to PostgreSQL\n", len(cleanedListings))
+	fmt.Printf("✓ %d listings saved to PostgreSQL\n", len(cleanedListings))
 
 	// Generate insights
 	fmt.Println("\n=== STEP 5: GENERATING INSIGHTS ===")
 	insightGen := services.NewInsightGenerator()
 	insights := insightGen.Generate(cleanedListings)
 	insightGen.PrintReport(insights)
-
 }
