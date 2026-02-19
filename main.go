@@ -4,23 +4,39 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/chromedp/chromedp"
 	"github.com/emon51/rental-scraper/config"
 	"github.com/emon51/rental-scraper/models"
-	scraper "github.com/emon51/rental-scraper/scraper"
+	"github.com/emon51/rental-scraper/scraper"
 	"github.com/emon51/rental-scraper/services"
 	"github.com/emon51/rental-scraper/storage"
 )
 
 func main() {
+	startTime := time.Now()
+	
 	fmt.Println("Airbnb Rental Scraper Starting...")
 
-	// Load configuration
 	cfg := config.NewConfig()
 
 	// Setup browser context
+	ctx := setupBrowserContext(cfg)
+
+	// Execute scraping pipeline
+	totalListings := 0
+	if err := runScrapingPipeline(ctx, cfg, &totalListings); err != nil {
+		log.Fatalf("Pipeline failed: %v", err)
+	}
+
+	duration := time.Since(startTime)
+	fmt.Printf("\n✓ Scraping Complete! (Duration: %v)\n", duration)
+}
+
+// setupBrowserContext creates and configures the browser context
+func setupBrowserContext(cfg *config.Config) context.Context {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", cfg.Headless),
 		chromedp.Flag("disable-gpu", false),
@@ -28,53 +44,126 @@ func main() {
 		chromedp.UserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
 	)
 
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancel()
+	allocCtx, _ := chromedp.NewExecAllocator(context.Background(), opts...)
+	ctx, _ := chromedp.NewContext(allocCtx)
+	ctx, _ = context.WithTimeout(ctx, time.Duration(cfg.PageTimeout)*time.Second)
 
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
+	return ctx
+}
 
-	ctx, cancel = context.WithTimeout(ctx, time.Duration(cfg.PageTimeout)*time.Second)
-	defer cancel()
+// runScrapingPipeline executes the complete data collection and processing pipeline
+func runScrapingPipeline(ctx context.Context, cfg *config.Config, totalListings *int) error {
+	// Step 1: Scrape data
+	rawListings, err := scrapeListingsConcurrently(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("scraping failed: %w", err)
+	}
+	*totalListings = len(rawListings)
 
-	// Create scraper
-	s := scraper.NewScraper(cfg.BaseURL, cfg.MaxListings, cfg.RequestDelay)
+	// Step 2: Clean and filter
+	cleanedListings := cleanData(rawListings)
 
-	// Scrape all locations
-	fmt.Println("\n=== STEP 1: SCRAPING ===")
-	var allListings []models.Listing
+	// Step 3: Save to CSV
+	if err := saveToCSV(cleanedListings); err != nil {
+		return fmt.Errorf("CSV save failed: %w", err)
+	}
 
-	for _, loc := range cfg.Locations {
-		fmt.Printf("\nScraping: %s\n", loc.DisplayName)
-		listings, err := s.ScrapeLocation(ctx, loc.Slug, loc.DisplayName)
-		if err != nil {
-			fmt.Printf("  WARNING: Failed to scrape %s: %v\n", loc.DisplayName, err)
-			continue
-		}
+	// Step 4: Save to PostgreSQL
+	if err := saveToDatabase(cleanedListings, cfg); err != nil {
+		return fmt.Errorf("database save failed: %w", err)
+	}
+
+	// Step 5: Generate insights
+	generateInsights(cleanedListings)
+
+	return nil
+}
+
+// scrapeListingsConcurrently collects listings from all configured locations using goroutines
+func scrapeListingsConcurrently(ctx context.Context, cfg *config.Config) ([]models.Listing, error) {
+	fmt.Println("\n=== STEP 1: SCRAPING (CONCURRENT) ===")
+
+	s := scraper.NewScraper(cfg.BaseURL, cfg.ListingsPerPage, cfg.PagesToScrape, cfg.RequestDelay)
+	
+	// Channel to collect listings
+	listingsChan := make(chan []models.Listing, len(cfg.Locations))
+	
+	// WaitGroup to wait for all goroutines
+	var wg sync.WaitGroup
+	
+	// Semaphore to limit concurrent scrapers
+	maxConcurrent := cfg.MaxConcurrent
+	semaphore := make(chan struct{}, maxConcurrent)
+
+	// Launch goroutines for each location
+	for i, loc := range cfg.Locations {
+		wg.Add(1)
+		
+		go func(index int, location config.LocationConfig) {
+			defer wg.Done()
+			
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			fmt.Printf("\n[%d/%d] Scraping: %s\n", index+1, len(cfg.Locations), location.DisplayName)
+
+			listings, err := s.ScrapeLocation(ctx, location.Slug, location.DisplayName)
+			if err != nil {
+				fmt.Printf("  WARNING: Failed to scrape %s: %v\n", location.DisplayName, err)
+				listingsChan <- []models.Listing{}
+				return
+			}
+
+			fmt.Printf("✓ Collected %d listings from %s\n", len(listings), location.DisplayName)
+			listingsChan <- listings
+		}(i, loc)
+	}
+
+	// Close channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(listingsChan)
+	}()
+
+	// Collect all listings
+	allListings := make([]models.Listing, 0)
+	for listings := range listingsChan {
 		allListings = append(allListings, listings...)
-
-		// Small pause between locations to avoid rate limiting
-		time.Sleep(3 * time.Second)
 	}
 
 	fmt.Printf("\nRaw listings scraped: %d\n", len(allListings))
+	return allListings, nil
+}
 
-	// Filter and clean data
+// cleanData filters and validates scraped data
+func cleanData(listings []models.Listing) []models.Listing {
 	fmt.Println("\n=== STEP 2: FILTERING & CLEANING ===")
+
 	filter := services.NewFilter()
-	cleanedListings := filter.CleanListings(allListings)
-	fmt.Printf("Cleaned listings: %d\n", len(cleanedListings))
+	cleaned := filter.CleanListings(listings)
 
-	// Save to CSV
+	fmt.Printf("Cleaned listings: %d\n", len(cleaned))
+	return cleaned
+}
+
+// saveToCSV exports listings to CSV file
+func saveToCSV(listings []models.Listing) error {
 	fmt.Println("\n=== STEP 3: SAVING TO CSV ===")
-	csvWriter := storage.NewCSVWriter("listings.csv")
-	if err := csvWriter.WriteListings(cleanedListings); err != nil {
-		log.Fatalf("Failed to save CSV: %v", err)
-	}
-	fmt.Println("✓ Data saved to listings.csv")
 
-	// Save to PostgreSQL
+	csvWriter := storage.NewCSVWriter("listings.csv")
+	if err := csvWriter.WriteListings(listings); err != nil {
+		return err
+	}
+
+	fmt.Println("✓ Data saved to listings.csv")
+	return nil
+}
+
+// saveToDatabase persists listings to PostgreSQL
+func saveToDatabase(listings []models.Listing, cfg *config.Config) error {
 	fmt.Println("\n=== STEP 4: SAVING TO POSTGRESQL ===")
+
 	pgWriter, err := storage.NewPostgresWriter(
 		cfg.DBConfig.Host,
 		cfg.DBConfig.Port,
@@ -83,23 +172,28 @@ func main() {
 		cfg.DBConfig.DBName,
 	)
 	if err != nil {
-		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+		return fmt.Errorf("connection failed: %w", err)
 	}
 	defer pgWriter.Close()
 
 	if err := pgWriter.CreateTable(); err != nil {
-		log.Fatalf("Failed to create table: %v", err)
+		return fmt.Errorf("table creation failed: %w", err)
 	}
 	fmt.Println("✓ Database table created")
 
-	if err := pgWriter.InsertListings(cleanedListings); err != nil {
-		log.Fatalf("Failed to insert listings: %v", err)
+	if err := pgWriter.InsertListings(listings); err != nil {
+		return fmt.Errorf("insert failed: %w", err)
 	}
-	fmt.Printf("✓ %d listings saved to PostgreSQL\n", len(cleanedListings))
+	fmt.Printf("✓ %d listings saved to PostgreSQL\n", len(listings))
 
-	// Generate insights
+	return nil
+}
+
+// generateInsights calculates and displays statistics
+func generateInsights(listings []models.Listing) {
 	fmt.Println("\n=== STEP 5: GENERATING INSIGHTS ===")
+
 	insightGen := services.NewInsightGenerator()
-	insights := insightGen.Generate(cleanedListings)
+	insights := insightGen.Generate(listings)
 	insightGen.PrintReport(insights)
 }
