@@ -1,13 +1,15 @@
 package config
 
 type Config struct {
-	BaseURL      string
-	Locations    []LocationConfig
-	MaxListings  int
-	PageTimeout  int
-	RequestDelay int
-	Headless     bool
-	DBConfig     DatabaseConfig
+	BaseURL           string
+	Locations         []LocationConfig
+	ListingsPerPage   int
+	PagesToScrape     int
+	PageTimeout       int
+	RequestDelay      int
+	Headless          bool
+	MaxConcurrent     int
+	DBConfig          DatabaseConfig
 }
 
 type LocationConfig struct {
@@ -25,11 +27,13 @@ type DatabaseConfig struct {
 
 func NewConfig() *Config {
 	return &Config{
-		BaseURL:     "https://www.airbnb.com/s/%s/homes",
-		MaxListings: 2,
-		PageTimeout: 600,
-		RequestDelay: 2,
-		Headless:    true,
+		BaseURL:         "https://www.airbnb.com/s/%s/homes",
+		ListingsPerPage: 5,
+		PagesToScrape:   2, // Page 1 and Page 2
+		PageTimeout:     600,
+		RequestDelay:    2,
+		Headless:        true,
+		MaxConcurrent:   3,
 		Locations: []LocationConfig{
 			{Slug: "Kuala-Lumpur", DisplayName: "Kuala Lumpur, Malaysia"},
 			{Slug: "Bangkok", DisplayName: "Bangkok, Thailand"},
