@@ -11,61 +11,60 @@ import (
 )
 
 type Scraper struct {
-	baseURL      string
-	maxListings  int
-	requestDelay int
+	baseURL         string
+	listingsPerPage int
+	pagesToScrape   int
+	requestDelay    int
 }
 
-func NewScraper(baseURL string, maxListings, requestDelay int) *Scraper {
+func NewScraper(baseURL string, listingsPerPage, pagesToScrape, requestDelay int) *Scraper {
 	return &Scraper{
-		baseURL:      baseURL,
-		maxListings:  maxListings,
-		requestDelay: requestDelay,
+		baseURL:         baseURL,
+		listingsPerPage: listingsPerPage,
+		pagesToScrape:   pagesToScrape,
+		requestDelay:    requestDelay,
 	}
 }
 
-// ScrapeLocation scrapes 1 listing from page 1 and 1 listing from page 2.
+// ScrapeLocation scrapes multiple pages from a location (e.g., 5 from page 1, 5 from page 2)
 func (s *Scraper) ScrapeLocation(ctx context.Context, locationSlug, displayName string) ([]models.Listing, error) {
 	var allListings []models.Listing
 
 	// Airbnb pagination: page 1 = offset 0, page 2 = offset 20
-	pages := []struct {
-		pageNum int
-		offset  int
-	}{
-		{1, 0},
-		{2, 20},
-	}
+	for page := 1; page <= s.pagesToScrape; page++ {
+		offset := (page - 1) * 20 // Airbnb uses offset of 20 per page
 
-	for _, page := range pages {
 		url := fmt.Sprintf(s.baseURL, locationSlug)
-		if page.offset > 0 {
-			url = fmt.Sprintf("%s?items_offset=%d", url, page.offset)
+		if offset > 0 {
+			url = fmt.Sprintf("%s?items_offset=%d", url, offset)
 		}
 
-		fmt.Printf("  [%s] Page %d: %s\n", displayName, page.pageNum, url)
+		fmt.Printf("  [%s] Page %d: Fetching %d listings...\n", displayName, page, s.listingsPerPage)
 
 		var listings []models.Listing
 
 		err := chromedp.Run(ctx,
 			chromedp.Navigate(url),
 			chromedp.Sleep(12*time.Second),
-			chromedp.Evaluate(s.getExtractionScript(1), &listings), // fetch only 1 per page
+			chromedp.Evaluate(s.getExtractionScript(s.listingsPerPage), &listings),
 		)
 		if err != nil {
-			fmt.Printf("  WARNING: Failed page %d for %s: %v\n", page.pageNum, displayName, err)
+			fmt.Printf("  WARNING: Failed page %d for %s: %v\n", page, displayName, err)
 			continue
 		}
 
-		fmt.Printf("  Found %d listing on page %d of %s\n", len(listings), page.pageNum, displayName)
+		fmt.Printf("  Found %d listings on page %d of %s\n", len(listings), page, displayName)
 
-		// Set metadata and fetch description
+		// Set metadata and fetch descriptions
 		for i := range listings {
 			if listings[i].URL != "" {
-				fmt.Printf("    Fetching description (page %d, item %d)...\n", page.pageNum, i+1)
 				listings[i].Platform = "Airbnb"
 				listings[i].Location = displayName
+				
+				// Fetch description
+				fmt.Printf("    Fetching description (page %d, item %d/%d)...\n", page, i+1, len(listings))
 				listings[i].Description = s.getDescription(ctx, listings[i].URL)
+				
 				time.Sleep(time.Duration(s.requestDelay) * time.Second)
 			}
 		}
@@ -73,13 +72,15 @@ func (s *Scraper) ScrapeLocation(ctx context.Context, locationSlug, displayName 
 		allListings = append(allListings, listings...)
 
 		// Pause between pages
-		time.Sleep(3 * time.Second)
+		if page < s.pagesToScrape {
+			time.Sleep(3 * time.Second)
+		}
 	}
 
 	return allListings, nil
 }
 
-// getExtractionScript returns JS to extract up to `limit` listings from the current page.
+// getExtractionScript returns JS to extract up to `limit` listings from the current page
 func (s *Scraper) getExtractionScript(limit int) string {
 	return fmt.Sprintf(`
 		(() => {
@@ -128,7 +129,7 @@ func (s *Scraper) getDescription(ctx context.Context, url string) string {
 
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(url),
-		chromedp.Sleep(6*time.Second),
+		chromedp.Sleep(5*time.Second),
 		chromedp.Evaluate(`
 			document.querySelector('[data-section-id="DESCRIPTION_DEFAULT"]')?.innerText || ''
 		`, &description),
