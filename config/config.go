@@ -9,12 +9,18 @@ type Config struct {
 	RequestDelay      int
 	Headless          bool
 	MaxConcurrent     int
+	DescriptionConfig DescriptionFetchConfig
 	DBConfig          DatabaseConfig
 }
 
 type LocationConfig struct {
-	Slug        string 
+	Slug        string
 	DisplayName string
+}
+
+type DescriptionFetchConfig struct {
+	MaxConcurrent int // Concurrent description fetches per location
+	Timeout       int // Timeout for each description fetch in seconds
 }
 
 type DatabaseConfig struct {
@@ -29,11 +35,15 @@ func NewConfig() *Config {
 	return &Config{
 		BaseURL:         "https://www.airbnb.com/s/%s/homes",
 		ListingsPerPage: 5,
-		PagesToScrape:   2, // Page 1 and Page 2
+		PagesToScrape:   2,
 		PageTimeout:     600,
 		RequestDelay:    2,
 		Headless:        true,
 		MaxConcurrent:   3,
+		DescriptionConfig: DescriptionFetchConfig{
+			MaxConcurrent: 3,
+			Timeout:       10,
+		},
 		Locations: []LocationConfig{
 			{Slug: "Kuala-Lumpur", DisplayName: "Kuala Lumpur, Malaysia"},
 			{Slug: "Bangkok", DisplayName: "Bangkok, Thailand"},
