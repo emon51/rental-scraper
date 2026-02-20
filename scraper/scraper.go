@@ -8,47 +8,40 @@ import (
 	"time"
 
 	"github.com/chromedp/chromedp"
+	"github.com/emon51/rental-scraper/config"
 	"github.com/emon51/rental-scraper/models"
 )
 
 type Scraper struct {
-	baseURL         string
-	listingsPerPage int
-	pagesToScrape   int
-	requestDelay    int
+	baseURL              string
+	listingsPerPage      int
+	pagesToScrape        int
+	requestDelay         int
+	descriptionConfig    config.DescriptionFetchConfig
 }
 
-func NewScraper(baseURL string, listingsPerPage, pagesToScrape, requestDelay int) *Scraper {
+func NewScraper(baseURL string, listingsPerPage, pagesToScrape, requestDelay int, descConfig config.DescriptionFetchConfig) *Scraper {
 	return &Scraper{
-		baseURL:         baseURL,
-		listingsPerPage: listingsPerPage,
-		pagesToScrape:   pagesToScrape,
-		requestDelay:    requestDelay,
+		baseURL:           baseURL,
+		listingsPerPage:   listingsPerPage,
+		pagesToScrape:     pagesToScrape,
+		requestDelay:      requestDelay,
+		descriptionConfig: descConfig,
 	}
 }
 
-// ScrapeLocation scrapes multiple pages from a location (e.g., 5 from page 1, 5 from page 2)
+// ScrapeLocation scrapes multiple pages from a location
 func (s *Scraper) ScrapeLocation(ctx context.Context, locationSlug, displayName string) ([]models.Listing, error) {
 	var allListings []models.Listing
 
-	// Airbnb pagination: page 1 = offset 0, page 2 = offset 20
 	for page := 1; page <= s.pagesToScrape; page++ {
-		offset := (page - 1) * 20
+		offset := (page - 1) * AirbnbPageOffset
 
-		url := fmt.Sprintf(s.baseURL, locationSlug)
-		if offset > 0 {
-			url = fmt.Sprintf("%s?items_offset=%d", url, offset)
-		}
+		url := s.buildURL(locationSlug, offset)
 
 		fmt.Printf("  [%s] Page %d: Fetching %d listings...\n", displayName, page, s.listingsPerPage)
 
-		var listings []models.Listing
-
-		err := chromedp.Run(ctx,
-			chromedp.Navigate(url),
-			chromedp.Sleep(12*time.Second),
-			chromedp.Evaluate(s.getExtractionScript(s.listingsPerPage), &listings),
-		)
+		listings, err := s.fetchListingsFromPage(ctx, url)
 		if err != nil {
 			fmt.Printf("  WARNING: Failed page %d for %s: %v\n", page, displayName, err)
 			continue
@@ -57,10 +50,7 @@ func (s *Scraper) ScrapeLocation(ctx context.Context, locationSlug, displayName 
 		fmt.Printf("  Found %d listings on page %d of %s\n", len(listings), page, displayName)
 
 		// Set metadata
-		for i := range listings {
-			listings[i].Platform = "Airbnb"
-			listings[i].Location = displayName
-		}
+		s.setListingMetadata(listings, displayName)
 
 		allListings = append(allListings, listings...)
 
@@ -70,20 +60,47 @@ func (s *Scraper) ScrapeLocation(ctx context.Context, locationSlug, displayName 
 		}
 	}
 
-	// Fetch descriptions concurrently for all listings
+	// Fetch descriptions concurrently
 	fmt.Printf("  Fetching descriptions concurrently for %s...\n", displayName)
 	s.fetchDescriptionsConcurrently(ctx, allListings)
 
 	return allListings, nil
 }
 
-// fetchDescriptionsConcurrently fetches descriptions for multiple listings in parallel
+// buildURL constructs the Airbnb search URL with pagination
+func (s *Scraper) buildURL(locationSlug string, offset int) string {
+	url := fmt.Sprintf(s.baseURL, locationSlug)
+	if offset > 0 {
+		url = fmt.Sprintf("%s?items_offset=%d", url, offset)
+	}
+	return url
+}
+
+// fetchListingsFromPage extracts listings from a single page
+func (s *Scraper) fetchListingsFromPage(ctx context.Context, url string) ([]models.Listing, error) {
+	var listings []models.Listing
+
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(url),
+		chromedp.Sleep(12*time.Second),
+		chromedp.Evaluate(s.getExtractionScript(), &listings),
+	)
+
+	return listings, err
+}
+
+// setListingMetadata adds platform and location to listings
+func (s *Scraper) setListingMetadata(listings []models.Listing, location string) {
+	for i := range listings {
+		listings[i].Platform = "Airbnb"
+		listings[i].Location = location
+	}
+}
+
+// fetchDescriptionsConcurrently fetches descriptions in parallel with rate limiting
 func (s *Scraper) fetchDescriptionsConcurrently(ctx context.Context, listings []models.Listing) {
 	var wg sync.WaitGroup
-	
-	// Semaphore to limit concurrent description fetches (avoid overwhelming server)
-	maxConcurrent := 3
-	semaphore := make(chan struct{}, maxConcurrent)
+	semaphore := make(chan struct{}, s.descriptionConfig.MaxConcurrent)
 
 	for i := range listings {
 		if listings[i].URL == "" {
@@ -91,18 +108,18 @@ func (s *Scraper) fetchDescriptionsConcurrently(ctx context.Context, listings []
 		}
 
 		wg.Add(1)
-		
+
 		go func(index int) {
 			defer wg.Done()
-			
+
 			// Acquire semaphore
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
 			fmt.Printf("    [%d/%d] Fetching description...\n", index+1, len(listings))
-			
+
 			listings[index].Description = s.getDescription(ctx, listings[index].URL)
-			
+
 			// Rate limiting
 			time.Sleep(time.Duration(s.requestDelay) * time.Second)
 		}(i)
@@ -111,59 +128,25 @@ func (s *Scraper) fetchDescriptionsConcurrently(ctx context.Context, listings []
 	wg.Wait()
 }
 
-// getExtractionScript returns JS to extract up to `limit` listings from the current page
-func (s *Scraper) getExtractionScript(limit int) string {
-	return fmt.Sprintf(`
-		(() => {
-			const cards = Array.from(document.querySelectorAll('[itemprop="itemListElement"]')).slice(0, %d);
-
-			return cards.map(card => {
-				const link = card.querySelector('a[href*="/rooms/"]');
-				const url = link ? link.href : '';
-
-				const titleEl = card.querySelector('[data-testid="listing-card-name"]');
-				const title = titleEl ? titleEl.innerText : '';
-
-				let price = '';
-				const allSpans = card.querySelectorAll('span');
-				for (let span of allSpans) {
-					const text = span.innerText.trim();
-					if (text.match(/^\$\d+/) || text.match(/^[A-Z]{1,3}\$?\d+/)) {
-						price = text.split('\n')[0];
-						break;
-					}
-				}
-
-				let rating = '';
-				for (let span of allSpans) {
-					const text = span.innerText.trim();
-					const match = text.match(/^(\d+\.\d+)/);
-					if (match && parseFloat(match[1]) >= 1 && parseFloat(match[1]) <= 5) {
-						rating = match[1];
-						break;
-					}
-				}
-
-				return {
-					title: title,
-					price: price,
-					rating: rating,
-					url: url
-				};
-			});
-		})()
-	`, limit)
+// getExtractionScript returns JavaScript to extract listings
+func (s *Scraper) getExtractionScript() string {
+	return fmt.Sprintf(ExtractionScriptTemplate, s.listingsPerPage)
 }
 
+// getDescription fetches description from a listing detail page
 func (s *Scraper) getDescription(ctx context.Context, url string) string {
+	// Create timeout context for description fetch
+	descCtx, cancel := context.WithTimeout(ctx, time.Duration(s.descriptionConfig.Timeout)*time.Second)
+	defer cancel()
+
 	var description string
 
-	err := chromedp.Run(ctx,
+	err := chromedp.Run(descCtx,
 		chromedp.Navigate(url),
 		chromedp.Sleep(5*time.Second),
-		chromedp.Evaluate(`
-			document.querySelector('[data-section-id="DESCRIPTION_DEFAULT"]')?.innerText || ''
-		`, &description),
+		chromedp.Evaluate(fmt.Sprintf(`
+			document.querySelector('%s')?.innerText || ''
+		`, DescriptionSelector), &description),
 	)
 
 	if err != nil {
