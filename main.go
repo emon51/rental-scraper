@@ -15,6 +15,15 @@ func main() {
 
 	fmt.Println("Airbnb Rental Scraper Starting...")
 
+	// Initialize logger
+	logger, err := utils.NewLogger("scraper.log")
+	if err != nil {
+		log.Fatalf("Failed to initialize logger: %v", err)
+	}
+	defer logger.Close()
+
+	logger.Info("Scraper application started")
+
 	// Load configuration
 	cfg := config.NewConfig()
 
@@ -22,11 +31,13 @@ func main() {
 	ctx := utils.CreateBrowserContext(cfg)
 
 	// Create and execute pipeline
-	pipeline := services.NewPipeline(cfg)
+	pipeline := services.NewPipeline(cfg, logger)
 	if err := pipeline.Execute(ctx); err != nil {
+		logger.Error("Pipeline execution failed", err)
 		log.Fatalf("Pipeline failed: %v", err)
 	}
 
 	duration := time.Since(startTime)
+	logger.LogScrapingSession(0, duration)
 	fmt.Printf("\n✓ Scraping Complete! (Duration: %v)\n", duration)
 }
