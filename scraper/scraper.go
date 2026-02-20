@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -32,7 +33,7 @@ func (s *Scraper) ScrapeLocation(ctx context.Context, locationSlug, displayName 
 
 	// Airbnb pagination: page 1 = offset 0, page 2 = offset 20
 	for page := 1; page <= s.pagesToScrape; page++ {
-		offset := (page - 1) * 20 // Airbnb uses offset of 20 per page
+		offset := (page - 1) * 20
 
 		url := fmt.Sprintf(s.baseURL, locationSlug)
 		if offset > 0 {
@@ -55,18 +56,10 @@ func (s *Scraper) ScrapeLocation(ctx context.Context, locationSlug, displayName 
 
 		fmt.Printf("  Found %d listings on page %d of %s\n", len(listings), page, displayName)
 
-		// Set metadata and fetch descriptions
+		// Set metadata
 		for i := range listings {
-			if listings[i].URL != "" {
-				listings[i].Platform = "Airbnb"
-				listings[i].Location = displayName
-				
-				// Fetch description
-				fmt.Printf("    Fetching description (page %d, item %d/%d)...\n", page, i+1, len(listings))
-				listings[i].Description = s.getDescription(ctx, listings[i].URL)
-				
-				time.Sleep(time.Duration(s.requestDelay) * time.Second)
-			}
+			listings[i].Platform = "Airbnb"
+			listings[i].Location = displayName
 		}
 
 		allListings = append(allListings, listings...)
@@ -77,7 +70,45 @@ func (s *Scraper) ScrapeLocation(ctx context.Context, locationSlug, displayName 
 		}
 	}
 
+	// Fetch descriptions concurrently for all listings
+	fmt.Printf("  Fetching descriptions concurrently for %s...\n", displayName)
+	s.fetchDescriptionsConcurrently(ctx, allListings)
+
 	return allListings, nil
+}
+
+// fetchDescriptionsConcurrently fetches descriptions for multiple listings in parallel
+func (s *Scraper) fetchDescriptionsConcurrently(ctx context.Context, listings []models.Listing) {
+	var wg sync.WaitGroup
+	
+	// Semaphore to limit concurrent description fetches (avoid overwhelming server)
+	maxConcurrent := 3
+	semaphore := make(chan struct{}, maxConcurrent)
+
+	for i := range listings {
+		if listings[i].URL == "" {
+			continue
+		}
+
+		wg.Add(1)
+		
+		go func(index int) {
+			defer wg.Done()
+			
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			fmt.Printf("    [%d/%d] Fetching description...\n", index+1, len(listings))
+			
+			listings[index].Description = s.getDescription(ctx, listings[index].URL)
+			
+			// Rate limiting
+			time.Sleep(time.Duration(s.requestDelay) * time.Second)
+		}(i)
+	}
+
+	wg.Wait()
 }
 
 // getExtractionScript returns JS to extract up to `limit` listings from the current page
