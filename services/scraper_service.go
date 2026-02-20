@@ -27,6 +27,7 @@ func (ss *ScraperService) ScrapeAll(ctx context.Context) ([]models.Listing, erro
 		ss.cfg.ListingsPerPage,
 		ss.cfg.PagesToScrape,
 		ss.cfg.RequestDelay,
+		ss.cfg.DescriptionConfig, // Pass description config
 	)
 
 	// Channel to collect listings
