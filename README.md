@@ -100,38 +100,50 @@ SELECT location, COUNT(*) FROM listings GROUP BY location ORDER BY COUNT(*) DESC
 ## Scripts
 
 ### Main Script
+Run everything (checks, starts DB, runs scraper)
 ```bash
-# Run everything (checks, starts DB, runs scraper)
 ./run.sh
 ```
 
 ### Helper Scripts
+View database interactively
 ```bash
-# View database interactively
 ./scripts/view_db.sh
+```
 
-# Show statistics
+Show statistics
+```bash
 ./scripts/stats.sh
+```
 
-# Clean up data files
+Clean up data files
+```bash
 ./scripts/clean.sh
+```
 
-# Stop PostgreSQL
+Stop PostgreSQL
+```bash
 ./scripts/stop.sh
 ```
 
 ### Manual Commands
+Start PostgreSQL only
 ```bash
-# Start PostgreSQL only
 docker-compose up -d
+```
 
-# Stop PostgreSQL
+Stop PostgreSQL
+```bash
 docker-compose down
+```
 
-# View logs
+View logs
+```bash
 tail -f scraper.log
+```
 
-# Run scraper only
+Run scraper only
+```bash
 go run main.go
 ```
 
