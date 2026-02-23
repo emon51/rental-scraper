@@ -97,6 +97,43 @@ SELECT title, price, location, rating FROM listings LIMIT 10;
 SELECT location, COUNT(*) FROM listings GROUP BY location ORDER BY COUNT(*) DESC;
 ```
 
+## Scripts
+
+### Main Script
+```bash
+# Run everything (checks, starts DB, runs scraper)
+./run.sh
+```
+
+### Helper Scripts
+```bash
+# View database interactively
+./scripts/view_db.sh
+
+# Show statistics
+./scripts/stats.sh
+
+# Clean up data files
+./scripts/clean.sh
+
+# Stop PostgreSQL
+./scripts/stop.sh
+```
+
+### Manual Commands
+```bash
+# Start PostgreSQL only
+docker-compose up -d
+
+# Stop PostgreSQL
+docker-compose down
+
+# View logs
+tail -f scraper.log
+
+# Run scraper only
+go run main.go
+```
 
 ## Configuration
 
