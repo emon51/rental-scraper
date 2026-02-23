@@ -22,8 +22,8 @@ func NewPipeline(cfg *config.Config, logger *utils.Logger) *Pipeline {
 	}
 }
 
-// Execute runs the complete scraping pipeline
-func (p *Pipeline) Execute(ctx context.Context) error {
+// Execute runs the complete scraping pipeline and returns total listings count
+func (p *Pipeline) Execute(ctx context.Context) (int, error) {
 	p.logger.Info("Pipeline execution started")
 
 	// Step 1: Scrape data
@@ -31,27 +31,27 @@ func (p *Pipeline) Execute(ctx context.Context) error {
 	cleanedListings, err := scraperService.ScrapeAll(ctx)
 	if err != nil {
 		p.logger.Error("Scraping failed", err)
-		return fmt.Errorf("scraping failed: %w", err)
+		return 0, fmt.Errorf("scraping failed: %w", err)
 	}
 	p.logger.Success(fmt.Sprintf("Scraped %d listings", len(cleanedListings)))
 
 	// Step 2: Save to CSV
 	if err := p.saveToCSV(cleanedListings); err != nil {
 		p.logger.Error("CSV save failed", err)
-		return fmt.Errorf("CSV save failed: %w", err)
+		return len(cleanedListings), fmt.Errorf("CSV save failed: %w", err)
 	}
 
 	// Step 3: Save to PostgreSQL
 	if err := p.saveToDatabase(cleanedListings); err != nil {
 		p.logger.Error("Database save failed", err)
-		return fmt.Errorf("database save failed: %w", err)
+		return len(cleanedListings), fmt.Errorf("database save failed: %w", err)
 	}
 
 	// Step 4: Generate insights
 	p.generateInsights(cleanedListings)
 	p.logger.Success("Insights generated successfully")
 
-	return nil
+	return len(cleanedListings), nil
 }
 
 func (p *Pipeline) saveToCSV(listings []models.Listing) error {

@@ -32,12 +32,13 @@ func main() {
 
 	// Create and execute pipeline
 	pipeline := services.NewPipeline(cfg, logger)
-	if err := pipeline.Execute(ctx); err != nil {
+	totalListings, err := pipeline.Execute(ctx)
+	if err != nil {
 		logger.Error("Pipeline execution failed", err)
 		log.Fatalf("Pipeline failed: %v", err)
 	}
 
 	duration := time.Since(startTime)
-	logger.LogScrapingSession(0, duration)
+	logger.LogScrapingSession(totalListings, duration)
 	fmt.Printf("\n✓ Scraping Complete! (Duration: %v)\n", duration)
 }
